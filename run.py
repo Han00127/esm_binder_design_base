@@ -38,6 +38,14 @@ def main():
     ap.add_argument("--no-lm", action="store_true", help="ESMC LM prior 끄기 (구조손실만)")
     ap.add_argument("--no-real-iptm", action="store_true",
                     help="저온 b* 추적을 distogram proxy 로 (기본=real confidence ipTM, Alg11 충실)")
+    ap.add_argument("--pssm", default=None,
+                    help="composition-KL 타깃 q_target.npz (지정 시 자연 CDR 분포 손실 켜짐)")
+    ap.add_argument("--lambda-comp", type=float, default=0.5, help="composition 손실 가중치")
+    ap.add_argument("--comp-loss", default="kl", choices=["kl", "ce"],
+                    help="composition 손실: kl(분포매칭) | ce(프로파일 NLL, 폭발 회피)")
+    ap.add_argument("--wandb", action="store_true", help="Weights & Biases 로깅 켜기")
+    ap.add_argument("--wandb-project", default="esm_binder_design", help="wandb 프로젝트명")
+    ap.add_argument("--wandb-name", default=None, help="wandb run 이름")
     ap.add_argument("--rank", action="store_true", help="후처리 4-critic ipSAE 랭킹 수행")
     ap.add_argument("--rank-msa", default="auto", choices=["auto", "none"], help="랭킹 폴딩 MSA")
     ap.add_argument("--rank-critics", default=None, help="critic key 콤마구분 (기본 4개)")
@@ -104,10 +112,24 @@ def main():
             masked_within = [int(p) - sc_off for p in masked_full]     # CDR → scFv 내 인덱스
             return prior.score(soft_scfv, masked_within)
 
+    # ── composition-KL (자연 CDR 분포 타깃, build_pssm.py 산출 npz) ──
+    comp_fn, comp_target = None, None
+    if args.pssm:
+        from composition import CompositionTarget
+        print(f"[run] load composition target: {args.pssm} (λ_comp={args.lambda_comp})")
+        comp_target = CompositionTarget(args.pssm, device=dev)
+        print(f"[run] q_target {comp_target.n} 위치, q_global 방향족(W+Y+F)="
+              f"{float(comp_target.q_global[comp_target._arom_j].sum()):.3f}")
+
+        _cf = comp_target.nll if args.comp_loss == "ce" else comp_target.kl
+
+        def comp_fn(soft_cdr):                # soft_cdr [n_mut,20] (cdr_idx 순서)
+            return _cf(soft_cdr)              # --comp-loss 로 kl/ce 선택
+
     print("[run] load model (base biohub/ESMFold2) …")
     model, raw_fwd = load(device=dev)
 
-    P = Alg11Params(lambda_LM=0.05)
+    P = Alg11Params(lambda_LM=0.05, lambda_comp=(args.lambda_comp if args.pssm else 0.0))
     if args.steps:
         P.K = args.steps
     print(f"[run] Algorithm 11: K={P.K} α_max={P.alpha_max} T_min={P.T_min} "
@@ -116,6 +138,21 @@ def main():
     # ── 다중 trajectory 생성 (Alg11) → 후보 (graft 설계CDR → scFv) ──
     from esm.models.esmfold2.constants import PROTEIN_3TO1, PROTEIN_RESIDUE_TO_RES_TYPE
     id2aa = {PROTEIN_RESIDUE_TO_RES_TYPE[k]: PROTEIN_3TO1[k] for k in PROTEIN_3TO1}
+    arom_cols = [j for j in range(20) if id2aa.get(j + AA_BASE) in ("W", "Y", "F")]
+
+    # ── Weights & Biases (config + per-step loss 로깅) ──
+    wb, _gstep = None, [0]
+    if args.wandb:
+        import wandb
+        wb = wandb.init(project=args.wandb_project, name=args.wandb_name, config={
+            "K": P.K, "alpha_max": P.alpha_max, "T_min": P.T_min, "low_temp": P.low_temp,
+            "lambda_intra": P.lambda_intra, "lambda_inter": P.lambda_inter,
+            "lambda_glob": P.lambda_glob, "lambda_LM": P.lambda_LM, "lambda_comp": P.lambda_comp,
+            "iptm_steps": P.iptm_steps, "trajectories": args.trajectories,
+            "lm": (not args.no_lm), "real_iptm": (not args.no_real_iptm),
+            "pssm": args.pssm, "comp_loss": args.comp_loss, "config": args.config,
+            "antigen": ag_id, "L": L, "n_cdr": len(cdr_idx), "n_epitope": len(epitope)})
+        print(f"[run] wandb: {wb.url}")
 
     # ── 저온 real ipTM b* 추적 (Alg11 line12-15): 현재 설계 argmax → 이산 scFv → real
     #    confidence head fold(no_grad) → 항원↔scFv ipTM. (--no-real-iptm 이면 None → proxy 폴백) ──
@@ -132,35 +169,58 @@ def main():
     else:
         print("[run] 저온 b* = distogram-ipTM proxy (--no-real-iptm)")
 
+    AROM = set("WYF")
     candidates = []
     for t in range(args.trajectories):
         sd = args.seed_base + t
         print(f"\n[run] === trajectory {t+1}/{args.trajectories} (seed={sd}) ===")
+
+        def mcb(m, t=t):              # per-step wandb 로깅 (global step 연속)
+            if wb is not None:
+                wb.log({**m, "traj": t}, step=_gstep[0]); _gstep[0] += 1
+
         res = optimize_binder(
             model, raw_fwd, feats,
             binder_idx=cdr_idx, target_idx=target_idx, mutable_idx=mutable_idx,
             fold_idx=fold_idx, prompt_ids=prompt_ids, cys_col=CYS_J,
             build_soft_full=build_soft_full, esmc_score_fn=esmc_score_fn,
-            iptm_fn=iptm_fn, seed=sd, params=P, device=dev)
+            iptm_fn=iptm_fn, comp_fn=comp_fn, metrics_cb=(mcb if wb else None),
+            arom_cols=arom_cols, seed=sd, params=P, device=dev)
         xb = res["best_logits"]
         scfv_des = list(scfv)
         for p in cdr_idx:
             scfv_des[p - sc_off] = id2aa.get(int(xb[p].argmax()) + AA_BASE, "A")
         cdrseq = "".join(id2aa.get(int(xb[p].argmax()) + AA_BASE, "X") for p in cdr_idx)
+        arom = sum(c in AROM for c in cdrseq) / max(1, len(cdrseq))     # 최종 CDR 방향족 분율
+        # B* 자연성: 위치별 NLL (낮을수록 자연 분포에 가까움) + native 기준선
+        nat_nll = native_nll = None
+        if comp_target is not None:
+            best_j = [int(xb[p].argmax()) for p in cdr_idx]
+            nat_nll = round(comp_target.seq_nll(best_j), 3)
+            nj = [prompt_ids[p] for p in cdr_idx]
+            if all(j is not None for j in nj):
+                native_nll = round(comp_target.seq_nll(nj), 3)
         candidates.append({"name": f"s{sd}", "scfv": "".join(scfv_des),
-                           "disto_iptm": round(res["best_iptm"], 4), "cdr": cdrseq})
-        print(f"  disto_iptm={res['best_iptm']:.4f} CDR={cdrseq}")
+                           "disto_iptm": round(res["best_iptm"], 4), "cdr": cdrseq,
+                           "arom": round(arom, 3), "nat_nll": nat_nll})
+        print(f"  disto_iptm={res['best_iptm']:.4f} arom={arom:.2f} "
+              f"nat_nll={nat_nll} (native={native_nll}) CDR={cdrseq}")
+        if wb is not None:
+            wb.log({"traj_best_iptm": res["best_iptm"], "traj_arom": arom,
+                    "traj_nat_nll": nat_nll, "native_nat_nll": native_nll, "traj": t},
+                   step=_gstep[0])
 
     del model, raw_fwd            # 설계 모델 해제 (랭킹 critic 메모리 확보)
     torch.cuda.empty_cache()
 
-    if args.out:                  # 병렬 생성: 후보 JSON 저장 (랭킹은 통합 단계에서)
-        import json
+    import json
+    if args.out:                  # 후보 JSON 저장
         json.dump({"antigen_id": ag_id, "antigen_seq": ag_seq, "candidates": candidates},
                   open(args.out, "w"))
         print(f"[run] 후보 {len(candidates)}개 저장 → {args.out}")
 
     # ── 후처리 4-critic ipSAE 랭킹 ──
+    ranked = None
     if args.rank:
         import rank as ranker
         out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs", "rank_out")
@@ -168,13 +228,29 @@ def main():
         print(f"\n[run] === 4-critic ranking (msa={args.rank_msa}, GPU{args.rank_gpu}) ===")
         ranked = ranker.rank(candidates, ag_seq, ag_id, out_dir,
                              critic_keys=ck, msa=args.rank_msa, gpu=args.rank_gpu)
-        print("\n[run] ★ RANKED (avg_ipsae 내림차순):")
+        json.dump(ranked, open(os.path.join(out_dir, "ranked.json"), "w"), indent=2)
+        print(f"\n[run] ★ RANKED (avg_ipsae 내림차순) → {out_dir}/ranked.json:")
         for r in ranked:
-            print(f"  {r['name']}: avg_ipsae={r['avg_ipsae']} disto_iptm={r['disto_iptm']} CDR={r['cdr']}")
+            print(f"  {r['name']}: avg_ipsae={r['avg_ipsae']} disto_iptm={r['disto_iptm']} "
+                  f"arom={r.get('arom')} nat_nll={r.get('nat_nll')} CDR={r['cdr']}")
     else:
         print("\n[run] 후보:")
         for c in candidates:
-            print(f"  {c['name']}: disto_iptm={c['disto_iptm']} CDR={c['cdr']}")
+            print(f"  {c['name']}: disto_iptm={c['disto_iptm']} arom={c.get('arom')} "
+                  f"nat_nll={c.get('nat_nll')} CDR={c['cdr']}")
+
+    # ── wandb 결과 Table (모든 설계 비교: disto_iptm / arom / nat_nll / avg_ipsae / CDR) ──
+    if wb is not None:
+        import wandb
+        rows = ranked if ranked is not None else candidates
+        cols = ["name", "disto_iptm", "arom", "nat_nll", "avg_ipsae", "cdr"]
+        tbl = wandb.Table(columns=cols)
+        for r in rows:
+            tbl.add_data(r.get("name"), r.get("disto_iptm"), r.get("arom"),
+                         r.get("nat_nll"), r.get("avg_ipsae"), r.get("cdr"))
+        wb.log({"results": tbl})
+        wb.summary["n_designs"] = len(candidates)
+        wb.finish()
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ class Alg11Params:
     lambda_intra: float = 0.5
     lambda_inter: float = 0.5
     lambda_glob: float = 0.2
+    lambda_comp: float = 0.0   # composition-KL(자연 CDR 분포) 가중 (0=끔)
     low_temp: float = 0.05     # T<low_temp → confidence/ipTM 추적 구간
     iptm_steps: int = 50       # 저온 confidence forward diffusion steps
     distogram_sampling: int = 1  # 고온 distogram forward sampler steps(최소)
@@ -69,8 +70,8 @@ def _norm_grad(g, mask, n_mut):
 
 def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_idx,
                     prompt_ids, cys_col, build_soft_full, fold_idx=None, esmc_score_fn=None,
-                    iptm_fn=None, seed=0, params: Alg11Params = Alg11Params(), device="cuda",
-                    log=print):
+                    iptm_fn=None, comp_fn=None, metrics_cb=None, arom_cols=None, seed=0,
+                    params: Alg11Params = Alg11Params(), device="cuda", log=print):
     """Algorithm 11 실행. 반환: dict(best_seq_logits, best_iptm, final_logits, history).
 
     build_soft_full(soft_binder_L20, T) → 모델 입력용 res_type 분포 (target onehot + binder soft 배치).
@@ -92,6 +93,8 @@ def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_id
         ak = P.alpha_max * Tk                                                    # line6
         # ── 구조 손실 (ESMFold2 distogram) → g_struct, 그래프 *즉시 해제* ──
         soft_s = F.softmax(x / Tk, dim=-1)                                       # line7 (struct용)
+        arom_frac = (float(soft_s[mutable_idx][:, arom_cols].sum(-1).mean())     # 진단: 방향족 분율
+                     if arom_cols is not None else 0.0)
         soft_full = build_soft_full(soft_s, Tk)                                  # line9 concat
         dgram = esmfold_distogram(model, raw_fwd, feats, soft_full, P)           # line11 (grad)
         fold = fold_idx if fold_idx is not None else binder_idx
@@ -125,18 +128,33 @@ def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_id
         else:
             L_LM, g_LM = x.new_zeros(()), torch.zeros_like(x)
 
+        # ── composition-KL (자연 CDR 분포) → g_comp, *별도 softmax* (cheap, 모델 forward 없음) ──
+        if comp_fn is not None and P.lambda_comp > 0:
+            soft_c = F.softmax(x / Tk, dim=-1)
+            L_comp = comp_fn(soft_c[mutable_idx])                # [n_mut,20] (cdr_idx 순서)
+            g_comp = (torch.autograd.grad(L_comp, x)[0]
+                      if L_comp.requires_grad else torch.zeros_like(x))
+        else:
+            L_comp, g_comp = x.new_zeros(()), torch.zeros_like(x)
+
         # ── gradient 정규화 + 결합 + SGD (line24-27) ──
-        g = _norm_grad(g_struct, gmask, n_mut) + P.lambda_LM * _norm_grad(g_LM, gmask, n_mut)
+        g = (_norm_grad(g_struct, gmask, n_mut)
+             + P.lambda_LM * _norm_grad(g_LM, gmask, n_mut)
+             + P.lambda_comp * _norm_grad(g_comp, gmask, n_mut))
         with torch.no_grad():
             x -= ak * g
         if x.grad is not None:
             x.grad = None
 
-        hist.append({"k": k, "T": Tk, "L_intra": float(L_intra), "L_inter": float(L_inter),
-                     "L_glob": float(L_glob), "L_LM": float(L_LM), "disto_iptm": disto_iptm})
+        m = {"k": k, "T": Tk, "L_intra": float(L_intra), "L_inter": float(L_inter),
+             "L_glob": float(L_glob), "L_LM": float(L_LM), "L_comp": float(L_comp),
+             "arom_frac": arom_frac, "disto_iptm": disto_iptm, "best_iptm": best_iptm}
+        hist.append(m)
+        if metrics_cb is not None:
+            metrics_cb(m)
         if k % 25 == 0 or k == P.K:
             log(f"  [k={k:3d}] T={Tk:.3f} inter={float(L_inter):.3f} intra={float(L_intra):.3f} "
-                f"glob={float(L_glob):.3f} disto_iptm={disto_iptm:.3f}")
+                f"glob={float(L_glob):.3f} comp={float(L_comp):.3f} disto_iptm={disto_iptm:.3f}")
 
     dt = time.time() - t_loop
     log(f"[opt] {P.K} steps in {dt:.0f}s = {dt / P.K:.2f}s/step "

@@ -1,32 +1,35 @@
 # ──────────────────────────────────────────────────────────────
-# 최소 업로드: 코드 실행에 필요한 것만. 산출물·로그·문서(README 제외)·
-# 레퍼런스·캐시·가중치 전부 제외.
+# 업로드: 코드 + 분석/figure + 소형 PSSM(.npz). 대용량 실험결과·원천데이터 제외.
 # ──────────────────────────────────────────────────────────────
 
-# 산출물 (대용량 ~2GB)
+# 대용량 실험 산출물 (21GB)
 runs/
 results/
+wandb/
+
+# 폴딩 산출물
 *.cif
 *.npy
 *.pae
 *_confidence.json
 
+# 원천 데이터 (대용량) — data/ 의 build 코드로 재생성 (README 참조)
+data/oas_paired_vdomains.csv
+*.a3m
+
 # 로그
 *.log
 
-# 문서 — README.md 만 업로드, 나머지 .md 전부 제외
-*.md
-!README.md
+# 임시 오케스트레이션 스크립트 (full_run.sh 는 포함)
+_orchestrate_*.sh
 
-# 레퍼런스 (코드 실행에 불필요)
+# 레퍼런스 (실행 불필요)
 _esmcraft_losses_ref.py
 
 # 파이썬 캐시
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-*.egg-info/
 .ipynb_checkpoints/
 
 # 가중치 (절대 커밋 금지 — 경로 참조만)
@@ -41,3 +44,6 @@ weights/
 *.swp
 *~
 .vscode/
+
+# ── 포함되는 것(참고): *.py, report/*.png, report/*.md, docs/*.md,
+#    data/*.npz, data/*_stats.json, data/build_*.py, configs/, full_run.sh
