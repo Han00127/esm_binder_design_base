@@ -20,8 +20,10 @@ data/oas_paired_vdomains.csv
 # 로그
 *.log
 
-# 임시 오케스트레이션 스크립트 (full_run.sh 는 포함)
+# 임시 오케스트레이션/런처 스크립트 (full_run.sh 는 포함)
 _orchestrate_*.sh
+*_launcher.sh
+_build_length_full.sh
 
 # 레퍼런스 (실행 불필요)
 _esmcraft_losses_ref.py
