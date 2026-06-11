@@ -20,8 +20,10 @@ data/oas_paired_vdomains.csv
 # 로그
 *.log
 
-# 임시 오케스트레이션 스크립트 (full_run.sh 는 포함)
+# 임시 오케스트레이션/런처 스크립트 (full_run.sh 는 포함)
 _orchestrate_*.sh
+*_launcher.sh
+_build_length_full.sh
 
 # 레퍼런스 (실행 불필요)
 _esmcraft_losses_ref.py
@@ -52,4 +54,4 @@ report/*
 
 # ── GitHub 포함(참고): 루트 *.py(코드), report/*.png(figure), docs/*.md,
 #    data/*.npz, data/*_stats.json, configs/, full_run.sh
-# ── 제외: data/*.py(빌드), report/*.py(스크립트), report/팀미팅_리포트.md, 대용량/로그
+# ── 제외: data/*.py(빌드), report/*(figure 제외 스크립트/리포트), 대용량/로그

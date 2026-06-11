@@ -1,0 +1,80 @@
+name: trastuzumab_her2_imgt
+antigen:
+  id: T
+  sequence: ACHQLCARGHCWGPGPTQCVNCSQFLRGQECVEECRVLQGLPREYVNARHCLPCHPECQPQNGSVTCFGPEADQCVACAHYKDPPFCVARCPSGVKPDLSYMPIWKFPDEEGACQPCPINCTHSCVDLDDKGCPAEQRASPL
+epitope_residues:
+- 68
+- 69
+- 70
+- 71
+- 72
+- 81
+- 82
+- 83
+- 84
+- 90
+- 104
+- 126
+- 127
+- 128
+- 129
+- 130
+- 131
+- 132
+- 133
+- 134
+- 135
+- 136
+antibody:
+  heavy:
+    id: H
+    vh_sequence: EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS
+    cdr_ranges:        # ★ IMGT CDR (27-38 / 56-65 / 105-117) → 서열 인덱스
+      H1:
+      - 25
+      - 33
+      H2:
+      - 50
+      - 58
+      H3:
+      - 96
+      - 109
+  light:
+    id: L
+    vl_sequence: DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK
+    cdr_ranges:
+      L1:
+      - 26
+      - 32
+      L2:
+      - 49
+      - 52
+      L3:
+      - 88
+      - 97
+optim:
+  n_steps: 100
+  lr_init: 0.2
+  lr_min: 0.01
+  seed: 42
+  num_loops: 1
+  num_sampling_steps: 64
+structure_prediction:
+  enabled: true
+  msa_mode: auto
+  num_loops: 10
+  num_sampling_steps: 64
+generator:
+  target_designs: 10
+  n_trajectories: 18
+  refold_topk: 12
+  omit_cys: true
+  construct: scfv
+  msa_mode: none
+  init_scale: 0.5
+  scfv_linker: GGGGSGGGGSGGGGS
+  scfv_order: VH-VL
+model:
+  weights: /home/aidx/DB/weights/esmfold2/ESMFold2
+output:
+  dir: results/{name}

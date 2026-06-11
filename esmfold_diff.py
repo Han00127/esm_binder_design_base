@@ -15,14 +15,39 @@ import os
 
 import torch
 
-from model_hooks import load_design_model, forward_design
+from model_hooks import _disable_trunk_checkpointing, load_design_model, forward_design
 
 DEFAULT_WEIGHTS = os.environ.get("ESMFOLD2_WEIGHTS", "/home/aidx/DB/weights/esmfold2/ESMFold2")
 
 
 def load(weights: str = DEFAULT_WEIGHTS, device: str = "cuda"):
-    """설계용 ESMFold2 로드 (distogram-only grad; confidence head 는 ipTM forward 에서 별도)."""
+    """설계용 ESMFold2 로드 (distogram-only grad; confidence head 는 ipTM forward 에서 별도).
+    KERNEL_FUSED=1 이면 FoldingTrunk trimul 을 fused CUDA 커널로 (속도 실험; 기본 미융합)."""
     model, raw_fwd = load_design_model(weights, device, enable_confidence_grad=False)
+    if os.environ.get("KERNEL_FUSED") == "1":
+        from transformers.models.esmfold2.modeling_esmfold2_common import BACKEND_FUSED
+        for nm in ("folding_trunk", "parcae_coda"):
+            m = getattr(model, nm, None)
+            if m is not None and hasattr(m, "set_kernel_backend"):
+                m.set_kernel_backend(BACKEND_FUSED)
+        print(f"[load] FoldingTrunk kernel_backend → {BACKEND_FUSED} (fused trimul)")
+    # ── torch.compile: 트렁크 블록(48 PairUpdateBlock)을 컴파일 → elementwise 융합·복사제거 ──
+    if os.environ.get("COMPILE") == "1":
+        nblk = 0
+        for nm in ("folding_trunk", "parcae_coda"):
+            m = getattr(model, nm, None)
+            if m is not None and hasattr(m, "blocks"):
+                for i in range(len(m.blocks)):
+                    m.blocks[i] = torch.compile(m.blocks[i])
+                    nblk += 1
+        print(f"[load] torch.compile 적용: 트렁크 블록 {nblk}개")
+    # ── DISABLE_CKPT=1: 트렁크 gradient checkpointing 해제 → backward 재계산 제거(메모리↑) ──
+    if os.environ.get("DISABLE_CKPT") == "1":
+        for nm in ("folding_trunk", "parcae_coda"):
+            m = getattr(model, nm, None)
+            if m is not None:
+                _disable_trunk_checkpointing(m)
+        print("[load] trunk gradient checkpointing 해제 (no-recompute backward)")
     return model, raw_fwd
 
 
