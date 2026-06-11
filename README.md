@@ -14,7 +14,7 @@ ESMC LM prior + **composition(위치별 자연 분포)** 로 자연성을 규제
 | CE-comp | **0.488** | 0.154 | 0.89 | 81.2 | 0.84 |
 
 → **자연 CDR 분포 prior 가 4-critic 전이(ipSAE)를 best 3배·mean 4.6배 향상.** (설계 현실성↑ → 독립 critic 전이↑.)
-새 과제: **다양성 붕괴**(germline 수렴). 상세 분석·figure: [`report/팀미팅_리포트.md`](report/팀미팅_리포트.md).
+새 과제: **다양성 붕괴**(germline 수렴). 상세 figure: `report/*.png`.
 
 ## 파이프라인
 
@@ -40,39 +40,22 @@ config -> run.py: scFv 조립 + 인덱스
 ├── scfv.py critics.py metrics.py run_esmfold2.py
 ├── full_run.sh            # 풀 실행 (GPU 병렬 생성 -> 통합 랭킹)
 ├── configs/               # 타깃 config (trastuzumab-HER2)
-├── data/                  # PSSM 빌드 코드 + 소형 PSSM(.npz)
-│   ├── build_pssm.py           # 위치별 q_target PSSM (설계 CDR 위치 매핑)
-│   ├── build_length_pssm.py    # 길이층화 PSSM (CDR x length x position) + 방향족 통계
-│   ├── download_oas_colab.py   # OAS paired 다운로드 (Colab -> Drive)
+├── data/                  # 소형 PSSM(.npz) — 빌드 코드는 로컬 전용(미공개)
 │   ├── trastuzumab_qtarget_oas.npz   # composition q_target (OAS+TheraSAbDab)
-│   └── length_pssm.npz + _stats.json # 56개 길이별 PSSM + 길이/방향족 통계
-├── report/                # ★ 데이터분석 (figure + 분석 스크립트 + 리포트)
-│   ├── 팀미팅_리포트.md
-│   ├── make_figures.py make_architecture.py make_cdr_compare.py
-│   ├── make_length_figures.py analyze_batch.py
+│   └── length_pssm.npz + _stats.json # 길이층화 PSSM + 길이/방향족 통계
+├── report/                # figure(.png) — 분석 스크립트·리포트는 로컬 전용(미공개)
 │   └── *.png  (fig0 아키텍처, fig1~6, fig4b, figA/B 비교, figL1~3 길이)
 └── docs/                  # PLAN.md, 코드가이드.md, 베이스라인정리.md
 ```
 
-## composition PSSM 데이터 소스 + 빌드
+## composition PSSM 사용법
 
-위치별 자연 분포 `q_target` 는 **자연 항체 서열**에서 ANARCI(IMGT) 넘버링으로 구축한다.
+위치별 자연 분포 `q_target` (PSSM)는 **레포에 `.npz`로 포함**되어 있어 바로 사용한다. (빌드/데이터소스 코드는 비공개·로컬 전용)
 
-**소스:**
-- **TheraSAbDab** (therapeutic 항체, 로컬 CSV) — `HeavySequence`/`LightSequence`.
-- **OAS paired** (Observed Antibody Space, 60만 쌍) — Colab 에서 다운로드 후 `data/oas_paired_vdomains.csv` 로 복사
-  (compute 노드 firewall → `data/download_oas_colab.py` 사용. 원천 CSV 는 대용량이라 레포 미포함).
+- `data/trastuzumab_qtarget_oas.npz` — 위치별 q_target (composition 손실용)
+- `data/length_pssm.npz` (+ `_stats.json`) — 길이층화 PSSM (variable-length 설계용)
 
-**빌드 (별도 anarci env 필요, 예: `conda create -n abnum -c bioconda anarci`):**
-```bash
-# 위치별 q_target (composition 손실용)
-python data/build_pssm.py --refs <TheraSAbDab.csv> data/oas_paired_vdomains.csv \
-    --out data/trastuzumab_qtarget_oas.npz --ncpu 14
-# 길이층화 PSSM (variable-length 설계용) + 길이/방향족 통계
-python data/build_length_pssm.py --refs <TheraSAbDab.csv> data/oas_paired_vdomains.csv \
-    --out data/length_pssm --ncpu 14
-```
-(소형 `.npz` 는 레포에 포함되어 있어 바로 사용 가능.)
+실행 시 `--pssm <npz>` 로 지정 (아래 **실행** 참조). 내용: 자연 항체(OAS+TheraSAbDab)를 ANARCI(IMGT)로 넘버링해 설계 CDR 위치의 자연 AA 분포를 집계한 것.
 
 ## 실행
 

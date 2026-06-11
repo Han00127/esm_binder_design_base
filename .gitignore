@@ -47,5 +47,10 @@ weights/
 *~
 .vscode/
 
+# 소스 스크립트·내부 리포트 (로컬 보존, GitHub 미업로드 — 본인만 보유)
+data/*.py
+report/*
+!report/*.png
+
 # ── 포함되는 것(참고): *.py, report/*.png, report/*.md, docs/*.md,
 #    data/*.npz, data/*_stats.json, data/build_*.py, configs/, full_run.sh
