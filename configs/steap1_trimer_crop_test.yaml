@@ -1,0 +1,73 @@
+name: steap1_trimer_h3only_crop
+antigen:
+  chains:
+  - id: A
+    sequence: TKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIV
+    epitope:
+    - 59
+    - 61
+  - id: B
+    sequence: TKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIV
+    epitope:
+    - 53
+    - 54
+    - 59
+  - id: C
+    sequence: TKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIV
+    epitope:
+    - 58
+    - 59
+binding_modes:
+- - A
+  - B
+  - C
+antibody:
+  heavy:
+    id: H
+    vh_sequence: QVQLVQSGAEVKKPGASVKVSCKASGYTFSTYWIEWVRQAPGQRLEWMGEILPGSGQTDFNEKFQGRVTFTADTSSDTAYMELSSLRSEDTAVYYCTRWGYYGTRGYFNVWGQGTLVTVSSASTKGPSVFPLAPSSKSTSGGTAALGCLVKDYFPEPVTVSWNSGALTSGVHTFPAVLQSSGLYSLSS
+    cdr_ranges:
+      H1:
+      - 32
+      - 33
+      H3:
+      - 99
+      - 107
+      light:
+    id: L
+    vl_sequence: EIVLTQSPATLSLSPGERATLSCRASSSVSYMHWFQQKPGQAPRLLIYSTSNLASGIPARFSGSGSGTDYTLTISSLEPEDFAVYYCQQRRSFPYTFGQGTKLEIKRTVAAPSVFIFPPSDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLTLSKADYEKHKVYACEVTHQGLSSPVTKSFNRGEC
+    cdr_ranges:
+      L1:
+      - 26
+      - 31
+      L2:
+      - 48
+      - 51
+      L3:
+      - 89
+      - 94
+optim:
+  n_steps: 100
+  lr_init: 0.2
+  lr_min: 0.01
+  seed: 42
+  num_loops: 1
+  num_sampling_steps: 64
+structure_prediction:
+  enabled: true
+  msa_mode: auto
+  num_loops: 10
+  num_sampling_steps: 64
+generator:
+  target_designs: 10
+  n_trajectories: 18
+  refold_topk: 12
+  omit_cys: true
+  construct: scfv
+  msa_mode: none
+  init_scale: 0.5
+  scfv_linker: GGGGSGGGGSGGGGS
+  scfv_order: VH-VL
+model:
+  weights: /home/aidx/DB/weights/esmfold2/ESMFold2
+output:
+  dir: results/{name}

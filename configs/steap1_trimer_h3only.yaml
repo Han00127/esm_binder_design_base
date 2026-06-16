@@ -1,0 +1,67 @@
+name: steap1_trimer_h3only
+# ─────────────────────────────────────────────────────────────────────────────
+# STEAP1 homotrimer (quaternary epitope) 템플릿.
+#   · antigen.chains : 항원 체인 리스트 [A, B, C]  (체인 순서대로 연쇄 → scFv 뒤에 붙음)
+#   · 각 체인 epitope : 그 체인이 '제공한 sequence' 기준 0-based 잔기
+#   · binding_modes  : OR(softmin). 각 mode = AND(한 paratope 로 동시 결합할 체인들).
+#                      homotrimer 라 3 seam(A/B, B/C, C/A) 자유 선택.
+#
+# ⚠️ VRAM: protomer 전장(~340)×3 + scFv(~250) ≈ 1270 → distogram gradient OOM 위험.
+#    STEAP1 삼량체화는 TM 도메인 매개라, extracellular 만 잘라 넣으면 trimer 가
+#    재조립 안 될 수 있음. crop 시 ① 삼량체화 scaffold 일부 유지 ② 설계 전
+#    cropped trimer 를 run_esmfold2 로 한 번 fold 해 A/B 경계 재현 확인 권장.
+#    crop 하면 아래 sequence 를 cropped 서열로, epitope 를 그 기준으로 다시 적을 것.
+# ─────────────────────────────────────────────────────────────────────────────
+antigen:
+  chains:
+    - id: A
+      sequence: MESRKDITNQEELWKMKPRRNLEEDDYLHKDTGETSMLKRPVLLHLHQTAHADEFDCPSELQHTQELFPQWHLPIKIAAIIASLTFLYTLLREVIHPLATSHQQYFYKIPILVINKVLPMVSITLLALVYLPGVIAAIVQLHNGTKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIVSLLLGTIHALIFAWNKWIDIKQFVWYTPPTFMIAVFLPIVVLIFKSILFLPCLRKKILKIRHGWEDVTKINKTEICSQLGGGGSDYKDDDDK
+      epitope: [199, 200, 202, 204]    # 1-based PDB 200,201,203,205 → 0-based
+    - id: B
+      sequence: MESRKDITNQEELWKMKPRRNLEEDDYLHKDTGETSMLKRPVLLHLHQTAHADEFDCPSELQHTQELFPQWHLPIKIAAIIASLTFLYTLLREVIHPLATSHQQYFYKIPILVINKVLPMVSITLLALVYLPGVIAAIVQLHNGTKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIVSLLLGTIHALIFAWNKWIDIKQFVWYTPPTFMIAVFLPIVVLIFKSILFLPCLRKKILKIRHGWEDVTKINKTEICSQLGGGGSDYKDDDDK
+      epitope: [196, 197, 199, 200, 201, 202]    # 1-based 197,198,200,201,202,203 → 0-based
+    - id: C
+      sequence: MESRKDITNQEELWKMKPRRNLEEDDYLHKDTGETSMLKRPVLLHLHQTAHADEFDCPSELQHTQELFPQWHLPIKIAAIIASLTFLYTLLREVIHPLATSHQQYFYKIPILVINKVLPMVSITLLALVYLPGVIAAIVQLHNGTKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIVSLLLGTIHALIFAWNKWIDIKQFVWYTPPTFMIAVFLPIVVLIFKSILFLPCLRKKILKIRHGWEDVTKINKTEICSQLGGGGSDYKDDDDK
+      epitope: [199, 200, 201, 202, 203, 204, 205]    # 1-based 200..206 → 0-based
+# apex(3-fold 축) quaternary: Fab 가 A·B·C 세 protomer 의 ~197-206 영역을 동시 접촉
+# → 단일 mode 로 셋 모두 AND (seam 선택 아님). co-localization 이 apex paratope 형성.
+binding_modes:
+  - [A, B, C]
+antibody:
+  heavy:
+    id: H
+    vh_sequence: EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS
+    cdr_ranges:        # H3-only: IMGT H3 → 서열 인덱스. 나머지 CDR native 고정
+      H3:
+      - 96
+      - 109
+  light:
+    id: L
+    vl_sequence: DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK
+    cdr_ranges: {}     # light CDR 전부 native 고정
+optim:
+  n_steps: 100
+  lr_init: 0.2
+  lr_min: 0.01
+  seed: 42
+  num_loops: 1
+  num_sampling_steps: 64
+structure_prediction:
+  enabled: true
+  msa_mode: auto
+  num_loops: 10
+  num_sampling_steps: 64
+generator:
+  target_designs: 10
+  n_trajectories: 18
+  refold_topk: 12
+  omit_cys: true
+  construct: scfv
+  msa_mode: none
+  init_scale: 0.5
+  scfv_linker: GGGGSGGGGSGGGGS
+  scfv_order: VH-VL
+model:
+  weights: /home/aidx/DB/weights/esmfold2/ESMFold2
+output:
+  dir: results/{name}
