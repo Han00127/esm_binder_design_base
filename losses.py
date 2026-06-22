@@ -81,15 +81,19 @@ def _d0(n):
     return 1.24 * (n - 15.0) ** (1.0 / 3.0) - 1.8
 
 
+INTERFACE_D0 = 8.0   # disto_iptm proxy 거리 스케일. 8UCD 인터페이스 CA-CA 4.7-10Å 기준.
+                     # (구: _d0(N)≈2.5 = global 구조정렬용 → 5-10Å 접촉을 0.2 이하로 압축해 신호 죽음)
+
+
 def interface_tm(distogram_logits, binder_idx, target_idx):
-    """expected-distance 기반 distance-TM, epitope-restricted. 0..1, 높을수록↑."""
+    """expected-distance 기반 distance-TM, epitope-restricted (d0=INTERFACE_D0). 0..1, 높을수록↑."""
     c = bin_centers(distogram_logits.device)
     p = F.softmax(distogram_logits.float(), dim=-1)
     exp_d = (p * c).sum(-1)
     if exp_d.dim() == 3:
         exp_d = exp_d[0]
     L = exp_d.shape[-1]; dev = exp_d.device
-    d0 = _d0(torch.tensor(float(len(binder_idx) + len(target_idx)), device=dev))
+    d0 = INTERFACE_D0    # 인터페이스 스케일(~8Å). 구 _d0(N) 은 global 정렬용이라 접촉 압축
     tm = 1.0 / (1.0 + (exp_d / d0) ** 2)
     mb = torch.zeros(L, device=dev); mb[torch.as_tensor(binder_idx, device=dev)] = 1.0
     mt = torch.zeros(L, device=dev); mt[torch.as_tensor(target_idx, device=dev)] = 1.0

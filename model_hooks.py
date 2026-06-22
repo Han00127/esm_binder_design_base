@@ -141,3 +141,124 @@ def forward_design(model, raw_fwd, features: dict, soft_res_type: torch.Tensor,
                       num_loops=num_loops, num_sampling_steps=num_sampling_steps,
                       num_diffusion_samples=num_diffusion_samples)
     return out
+
+
+def enable_pipeline_parallel(model, gpus, handicap: int = 14):
+    """트렁크 블록을 여러 GPU 에 분산(pipeline 병렬) — 단일 forward+backward 가 한 GPU 에
+    안 들어갈 때(예: STEAP1 trimer L≈1000+, 단일 80GB 천장 L≈850) 사용.
+
+    블록 *경계* 에서만 입력을 그 블록 device 로 .to() 하므로 (연산 내부 cross-device 없음 →
+    device_map 이 실패하는 지점을 회피), cross-device backward 를 PyTorch autograd 가 자동
+    처리한다(custom autograd/comms 불필요 = research-grade 아님).
+
+      · 각 트렁크 블록(msa_encoder/folding_trunk)을 그리디로 가장 한가한 GPU 에 배치.
+        gpus[0](=scaffold: embedding/heads/distogram·loss + 입출력)는 handicap 만큼 블록 적게.
+      · msa_encoder 블록은 gradient checkpointing 도 wrap (folding_trunk 는 forward 내부 checkpoint 내장).
+      · 각 모듈 출력은 forward_hook 으로 gpus[0] 로 복귀 → 모듈간 인터페이스는 gpus[0] 유지.
+
+    검증(report/_pipeline_probe.py): 2-GPU L1001 peak[75.9,72.2], 3-GPU L1001 peak[56.2,65.5,65.0].
+    반환: {device: 배치 블록수}. gpus 예: [0,1,2] (CUDA_VISIBLE_DEVICES 기준 가시 인덱스).
+    """
+    import torch.utils.checkpoint as _ckpt
+    devs = [f"cuda:{g}" if isinstance(g, int) else g for g in gpus]
+    dev0 = torch.device(devs[0])
+
+    def _wrap_ckpt(blk):
+        orig = blk.forward
+        def fwd(*a, **k):
+            if torch.is_grad_enabled() and any(torch.is_tensor(x) and x.requires_grad for x in a):
+                return _ckpt.checkpoint(orig, *a, use_reentrant=False, **k)
+            return orig(*a, **k)
+        blk.forward = fwd
+
+    def _wrap_dev(blk, dev):
+        blk.to(dev)
+        orig = blk.forward
+        def fwd(*a, **k):
+            a = tuple(x.to(dev) if torch.is_tensor(x) else x for x in a)
+            k = {kk: (vv.to(dev) if torch.is_tensor(vv) else vv) for kk, vv in k.items()}
+            return orig(*a, **k)
+        blk.forward = fwd
+
+    def _out_to0(mod, inp, out):
+        def mv(o):
+            return o.to(dev0) if (torch.is_tensor(o) and o.device != dev0) else o
+        if isinstance(out, tuple):
+            return tuple(mv(o) for o in out)
+        if isinstance(out, dict):
+            return {kk: mv(vv) for kk, vv in out.items()}
+        return mv(out)
+
+    lm = getattr(model, "lm_encoder", None)          # lm_encoder: gpus[0] 유지 + checkpoint(작음)
+    if lm is not None and getattr(lm, "blocks", None) is not None:
+        for blk in lm.blocks:
+            _wrap_ckpt(blk)
+
+    loadc = {d: 0 for d in devs}
+    loadc[devs[0]] += handicap                       # scaffold 부담 → gpus[0] 핸디캡
+    placed = {d: 0 for d in devs}
+    for nm in ("msa_encoder", "folding_trunk"):
+        mod = getattr(model, nm, None)
+        blocks = getattr(mod, "blocks", None) if mod is not None else None
+        if blocks is None:
+            continue
+        self_ckpt = (nm == "folding_trunk")          # folding_trunk 는 forward 내부 checkpoint 내장
+        for blk in blocks:
+            dev = min(loadc, key=loadc.get)
+            loadc[dev] += 1; placed[dev] += 1
+            if not self_ckpt:
+                _wrap_ckpt(blk)
+            _wrap_dev(blk, dev)
+        mod.register_forward_hook(_out_to0)
+    print(f"[pipeline] 블록 분배 {placed} (handicap={handicap}, gpus={devs})")
+    return placed
+
+
+def enable_recycle_detach_first(model):
+    """recycle 의 *마지막 패스만* gradient (BindCraft recycle_mode='last').
+
+    _run_one_loop 은 total_steps(=num_loops+1) 번 z 를 재귀 정제한다. 초기 (total_steps-1)
+    패스를 no_grad 로 돌리고 마지막 패스만 그래프에 넣음 →
+      · forward 정제는 그대로(2-pass distogram, 논문 loops=1 의 forward 유지)
+      · backward 는 1-pass 만 → 속도↑(backward 절반) + 메모리 ~1-pass.
+    gradient 는 마지막 패스의 trunk + (z_init/lm_z/msa) 주입 경로로만 흐름(재귀 상태 z 는 detach).
+    원본 _run_one_loop 본문을 그대로 재현하되 루프만 no_grad 분기."""
+    import types
+    import torch.nn.functional as F
+
+    def _run_one_loop_last_grad(self, z, z_init, lm_z, _msa_kwargs, pair_mask, a, b_mat, total_steps):
+        lm_cfg = self.config.lm_encoder
+        _per = (lm_z is not None and getattr(lm_cfg, "per_loop_lm_dropout", False)
+                and getattr(lm_cfg, "lm_dropout", 0.0) > 0.0)
+        _p = getattr(lm_cfg, "lm_dropout", 0.0)
+
+        def _iter(z):
+            lm_z_i = F.dropout(lm_z, p=_p, training=True) if _per else lm_z
+            refined_lm_z = None
+            if lm_z_i is not None and self.lm_encoder is not None:
+                refined_lm_z = self.lm_encoder(lm_z_i.to(z_init.dtype), pair_attention_mask=pair_mask)
+            z_inject_pair = z_init
+            if lm_z_i is not None and self.lm_encoder is None:
+                z_inject_pair = z_inject_pair + lm_z_i.to(z_inject_pair.dtype)
+            if self.msa_encoder is not None and _msa_kwargs is not None:
+                msa_pair = self.msa_encoder(x_pair=z_inject_pair, **_msa_kwargs).to(z_inject_pair.dtype)
+                z_inject_pair = (msa_pair if self.config.msa_encoder_overwrite
+                                 else (z_inject_pair + msa_pair))
+            if refined_lm_z is not None:
+                z_inject_pair = z_inject_pair + refined_lm_z.to(z_inject_pair.dtype)
+            injected_pair = self.parcae_input_norm(z_inject_pair)
+            z = a * z + F.linear(injected_pair.to(z.dtype), b_mat)
+            z = self.folding_trunk(z, pair_attention_mask=pair_mask)
+            return z
+
+        for i in range(total_steps):
+            if i < total_steps - 1:               # 초기 패스: no_grad (그래프 X)
+                with torch.no_grad():
+                    z = _iter(z)
+                z = z.detach()
+            else:                                 # 마지막 패스: grad
+                z = _iter(z)
+        return z
+
+    model._run_one_loop = types.MethodType(_run_one_loop_last_grad, model)
+    print("[detach-first] recycle 마지막 패스만 grad (BindCraft recycle_mode=last)")

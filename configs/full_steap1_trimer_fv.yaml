@@ -1,0 +1,71 @@
+name: steap1_full_trimer_fv
+# full_steap1_trimer_h3only.yaml 의 Fv-only 사본: vh_sequence→FR4 끝(121), vl_sequence→FR4 끝(106)
+# 까지만(CH1/CL 불변영역 제거). 항원 crop(73-325, 3체인) + epitope + CDR ranges 동일.
+# scFv 242 → L=1001 (3 GPU pipeline 완주 검증 크기). CDR 인덱스/프레임 그대로 유효.
+chains:
+  - id: A
+    sequence: LPIKIAAIIASLTFLYTLLREVIHPLATSHQQYFYKIPILVINKVLPMVSITLLALVYLPGVIAAIVQLHNGTKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIVSLLLGTIHALIFAWNKWIDIKQFVWYTPPTFMIAVFLPIVVLIFKSILFLPCLRKKILKIRHGWE
+    epitope:
+    - 127
+    - 128
+    - 130
+    - 132
+  - id: B
+    sequence: LPIKIAAIIASLTFLYTLLREVIHPLATSHQQYFYKIPILVINKVLPMVSITLLALVYLPGVIAAIVQLHNGTKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIVSLLLGTIHALIFAWNKWIDIKQFVWYTPPTFMIAVFLPIVVLIFKSILFLPCLRKKILKIRHGWE
+    epitope:
+    - 124
+    - 125
+    - 127
+    - 128
+    - 129
+    - 130
+  - id: C
+    sequence: LPIKIAAIIASLTFLYTLLREVIHPLATSHQQYFYKIPILVINKVLPMVSITLLALVYLPGVIAAIVQLHNGTKYKKFPHWLDKWMLTRKQFGLLSFFFAVLHAIYSLSYPMRRSYRYKLLNWAYQQVQQNKEDAWIEHDVWRMEIYVSLGIVGLAILALLAVTSIPSVSDSLTWREFHYIQSKLGIVSLLLGTIHALIFAWNKWIDIKQFVWYTPPTFMIAVFLPIVVLIFKSILFLPCLRKKILKIRHGWE
+    epitope:
+    - 127
+    - 128
+    - 129
+    - 130
+    - 131
+    - 132
+    - 133
+antibody:
+  heavy:
+    id: H
+    vh_sequence: QVQLVQSGAEVKKPGASVKVSCKASGYTFSTYWIEWVRQAPGQRLEWMGEILPGSGQTDFNEKFQGRVTFTADTSSDTAYMELSSLRSEDTAVYYCTRWGYYGTRGYFNVWGQGTLVTVSS
+    cdr_ranges:        # IMGT CDR → 서열 인덱스 (가변영역 기준; Fv 트림 후에도 동일)
+      H3:
+      - 96
+      - 110
+    cdr_fix_prefix:    # 각 CDR 앞 N개 위치는 native 고정, 나머지만 설계. H3:6 = 처음6 고정/뒤8 설계
+      H3: 6
+  light:
+    id: L
+    vl_sequence: EIVLTQSPATLSLSPGERATLSCRASSSVSYMHWFQQKPGQAPRLLIYSTSNLASGIPARFSGSGSGTDYTLTISSLEPEDFAVYYCQQRRSFPYTFGQGTKLEIK
+    cdr_ranges: {}
+optim:
+  n_steps: 100
+  lr_init: 0.2
+  lr_min: 0.01
+  seed: 42
+  num_loops: 1
+  num_sampling_steps: 64
+structure_prediction:
+  enabled: true
+  msa_mode: auto
+  num_loops: 10
+  num_sampling_steps: 64
+generator:
+  target_designs: 10
+  n_trajectories: 18
+  refold_topk: 12
+  omit_cys: true
+  construct: scfv
+  msa_mode: none
+  init_scale: 0.5
+  scfv_linker: GGGGSGGGGSGGGGS
+  scfv_order: VH-VL
+model:
+  weights: /home/aidx/DB/weights/esmfold2/ESMFold2
+output:
+  dir: results/{name}

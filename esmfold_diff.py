@@ -48,6 +48,18 @@ def load(weights: str = DEFAULT_WEIGHTS, device: str = "cuda"):
             if m is not None:
                 _disable_trunk_checkpointing(m)
         print("[load] trunk gradient checkpointing 해제 (no-recompute backward)")
+    # ── DETACH_FIRST=1: recycle 마지막 패스만 grad (BindCraft recycle_mode=last; backward 1-pass) ──
+    if os.environ.get("DETACH_FIRST") == "1":
+        from model_hooks import enable_recycle_detach_first
+        enable_recycle_detach_first(model)
+    # ── PIPELINE_GPUS="0,1,2": 트렁크 블록을 여러 GPU 에 분산(단일 forward 가 1 GPU 에 안 들어갈 때) ──
+    pg = os.environ.get("PIPELINE_GPUS")
+    if pg:
+        from model_hooks import enable_pipeline_parallel
+        gpus = [int(x) for x in pg.split(",") if x.strip() != ""]
+        hcap = int(os.environ.get("PIPELINE_HANDICAP", "14"))
+        enable_pipeline_parallel(model, gpus, handicap=hcap)
+        print(f"[load] pipeline 병렬 활성 (GPUs {gpus})")
     return model, raw_fwd
 
 

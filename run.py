@@ -12,6 +12,9 @@ from __future__ import annotations
 import argparse
 import os
 
+os.environ.setdefault("HF_HUB_OFFLINE", "1")        # 오프라인 클러스터: HF 네트워크 HEAD 호출 차단
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import torch
 import yaml
 
@@ -53,37 +56,66 @@ def main():
     ap.add_argument("--out", default=None, help="후보 JSON 저장 경로 (병렬 생성용)")
     ap.add_argument("--seed-base", type=int, default=0, help="trajectory seed 오프셋(GPU별 고유)")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--pipeline-gpus", default=None,
+                    help="트렁크 블록을 여러 GPU 에 분산(pipeline 병렬). 예: '0,1,2' "
+                         "(큰 L backward 가 1 GPU 천장(L≈850)을 넘을 때; CUDA_VISIBLE_DEVICES 가시 인덱스)")
+    ap.add_argument("--alpha-max", type=float, default=None,
+                    help="α_max override (Alg11 기본 0.1; K 축소 시 total path length 보정용)")
+    ap.add_argument("--lambda-lm", type=float, default=0.05,
+                    help="LM prior 가중치 λ_LM (기본 0.05; 줄이면 LM 영향↓)")
     args = ap.parse_args()
     dev = args.device
     cfg = yaml.safe_load(open(args.config))
 
     vh = _clean(cfg["antibody"]["heavy"]["vh_sequence"])
     vl = _clean(cfg["antibody"]["light"]["vl_sequence"])
-    ag = cfg["antigen"]; ag_id, ag_seq = ag["id"], _clean(ag["sequence"])
     scfv = scfvmod.make_scfv(vh, vl, LINKER, "VH-VL")["seq"]
 
-    # 체인: [항원(target), scFv(binder)]
+    # ── 항원 파싱: 단일(antigen.id/sequence + epitope_residues) | 다중체인(chains[].epitope) ──
+    #    다중체인이라도 loss 는 원래대로(inter_contact). target_idx = 모든 체인 epitope 의 전역 concat 인덱스
+    #    → binder 가 3 체인 epitope 전체로 당겨짐(원래 inter loss 그대로, quaternary 모드 아님).
+    if "chains" in cfg:                                  # 다중항원
+        ag_chains, epitope, _off = [], [], 0
+        for c in cfg["chains"]:
+            cid, cseq = c["id"], _clean(c["sequence"])
+            ag_chains.append((cid, cseq))
+            epitope += [_off + int(e) for e in c.get("epitope", [])]   # 체인-로컬 0-based → 전역
+            _off += len(cseq)
+    else:                                                # 단일항원 (기존 동작 유지)
+        ag = cfg["antigen"]
+        ag_chains = [(ag["id"], _clean(ag["sequence"]))]
+        epitope = [int(e) for e in cfg["epitope_residues"]]
+    ag_seq = "".join(s for _, s in ag_chains)            # concat 항원 (downstream 폴백용)
+    ag_id = ag_chains[0][0]
+    Lag = len(ag_seq)
+
+    # 체인: [항원체인들(target), scFv(binder)]
     builder = ESMFold2InputBuilder()
-    chains = [ProteinInput(id=ag_id, sequence=ag_seq), ProteinInput(id="S", sequence=scfv)]
+    chains = [ProteinInput(id=cid, sequence=s) for cid, s in ag_chains]
+    chains.append(ProteinInput(id="S", sequence=scfv))
     feats, _ = builder.prepare_input(
         StructurePredictionInput(sequences=chains), device=dev)
     rt = feats["res_type"]; L = rt.shape[1]
-    Lag, Lsc = len(ag_seq), len(scfv)
+    Lsc = len(scfv)
     assert L == Lag + Lsc, f"L={L} != {Lag}+{Lsc}"
 
-    # 인덱스 (항원 먼저: offset 0; scFv offset = Lag)
-    epitope = [int(e) for e in cfg["epitope_residues"]]          # 항원 0-based
-    target_idx = epitope                                         # inter-contact target
+    target_idx = epitope                                 # inter-contact target (전역 concat 인덱스)
     sc_off = Lag
     voff = len(vh) + len(LINKER)                                 # scFv 내 VL 시작
-    cdr_idx = []
+    h_fix = cfg["antibody"]["heavy"].get("cdr_fix_prefix", {}) or {}   # CDR 앞 N개 native 고정
+    l_fix = cfg["antibody"]["light"].get("cdr_fix_prefix", {}) or {}
+    cdr_idx, mutable_idx = [], []
     for _n, (s, e) in cfg["antibody"]["heavy"]["cdr_ranges"].items():
-        cdr_idx += [sc_off + p for p in range(s, e)]
+        pos = [sc_off + p for p in range(s, e)]
+        cdr_idx += pos
+        mutable_idx += pos[int(h_fix.get(_n, 0)):]               # 앞 N개 제외 → 나머지만 설계
     for _n, (s, e) in cfg["antibody"]["light"]["cdr_ranges"].items():
-        cdr_idx += [sc_off + voff + p for p in range(s, e)]
-    cdr_idx = sorted(set(cdr_idx))
+        pos = [sc_off + voff + p for p in range(s, e)]
+        cdr_idx += pos
+        mutable_idx += pos[int(l_fix.get(_n, 0)):]
+    cdr_idx = sorted(set(cdr_idx))                               # binder/loss = 전체 CDR
+    mutable_idx = sorted(set(mutable_idx))                       # 설계 = CDR − 고정prefix
     fold_idx = list(range(sc_off, sc_off + Lsc))                 # scFv 전체 (intra/glob)
-    mutable_idx = cdr_idx                                        # 설계 = CDR
 
     # prompt_ids: 각 위치의 20-AA j (res_type id - 2), 표준 AA 아니면 None
     rt0 = rt[0].tolist()
@@ -98,8 +130,8 @@ def main():
         d[0, :, AA_BASE:AA_BASE + 20] = soft_binder
         return d
 
-    print(f"[run] L={L} (ag {Lag} + scFv {Lsc}) | CDR(mutable) {len(cdr_idx)} | "
-          f"epitope {len(epitope)} | fold(scFv) {len(fold_idx)}")
+    print(f"[run] L={L} (ag {Lag} + scFv {Lsc}) | CDR {len(cdr_idx)} / mutable {len(mutable_idx)} "
+          f"(native 고정 {len(cdr_idx) - len(mutable_idx)}) | epitope {len(epitope)} | fold(scFv) {len(fold_idx)}")
 
     # ── ESMC LM prior (논문 Alg14, soft 문맥) ── binder(scFv) 부분서열에 CDR mask 로 동작
     esmc_score_fn = None
@@ -126,12 +158,17 @@ def main():
         def comp_fn(soft_cdr):                # soft_cdr [n_mut,20] (cdr_idx 순서)
             return _cf(soft_cdr)              # --comp-loss 로 kl/ce 선택
 
+    if args.pipeline_gpus:
+        os.environ["PIPELINE_GPUS"] = args.pipeline_gpus       # esmfold_diff.load 에서 분산 활성
+        print(f"[run] pipeline 병렬 요청: GPUs {args.pipeline_gpus}")
     print("[run] load model (base biohub/ESMFold2) …")
     model, raw_fwd = load(device=dev)
 
-    P = Alg11Params(lambda_LM=0.05, lambda_comp=(args.lambda_comp if args.pssm else 0.0))
+    P = Alg11Params(lambda_LM=args.lambda_lm, lambda_comp=(args.lambda_comp if args.pssm else 0.0))
     if args.steps:
         P.K = args.steps
+    if args.alpha_max is not None:
+        P.alpha_max = args.alpha_max
     print(f"[run] Algorithm 11: K={P.K} α_max={P.alpha_max} T_min={P.T_min} "
           f"λ(intra,inter,glob,LM)=({P.lambda_intra},{P.lambda_inter},{P.lambda_glob},{P.lambda_LM})")
 
@@ -157,7 +194,7 @@ def main():
     # ── 저온 real ipTM b* 추적 (Alg11 line12-15): 현재 설계 argmax → 이산 scFv → real
     #    confidence head fold(no_grad) → 항원↔scFv ipTM. (--no-real-iptm 이면 None → proxy 폴백) ──
     iptm_fn = None
-    if not args.no_real_iptm:
+    if not args.no_real_iptm and len(ag_chains) == 1:
         print(f"[run] 저온 b* = real confidence ipTM (fold steps={P.iptm_steps}, MSA 없음)")
 
         def iptm_fn(xb):
@@ -166,6 +203,8 @@ def main():
                 scfv_des[p - sc_off] = id2aa.get(int(xb[p].argmax()) + AA_BASE, "A")
             return iptm_confidence(model, builder, ag_id, ag_seq, "S", "".join(scfv_des),
                                    num_sampling_steps=P.iptm_steps, seed=0)
+    elif len(ag_chains) > 1:
+        print("[run] 저온 b* = distogram-ipTM proxy (다중항원 → real ipTM 폴드 미지원)")
     else:
         print("[run] 저온 b* = distogram-ipTM proxy (--no-real-iptm)")
 
@@ -195,9 +234,9 @@ def main():
         # B* 자연성: 위치별 NLL (낮을수록 자연 분포에 가까움) + native 기준선
         nat_nll = native_nll = None
         if comp_target is not None:
-            best_j = [int(xb[p].argmax()) for p in cdr_idx]
+            best_j = [int(xb[p].argmax()) for p in mutable_idx]   # comp 타깃 = mutable 위치 정렬
             nat_nll = round(comp_target.seq_nll(best_j), 3)
-            nj = [prompt_ids[p] for p in cdr_idx]
+            nj = [prompt_ids[p] for p in mutable_idx]
             if all(j is not None for j in nj):
                 native_nll = round(comp_target.seq_nll(nj), 3)
         candidates.append({"name": f"s{sd}", "scfv": "".join(scfv_des),
@@ -209,6 +248,11 @@ def main():
             wb.log({"traj_best_iptm": res["best_iptm"], "traj_arom": arom,
                     "traj_nat_nll": nat_nll, "native_nat_nll": native_nll, "traj": t},
                    step=_gstep[0])
+        if args.out:                  # 점진 저장: trajectory마다 갱신 → 중단해도 완료분 보존
+            import json as _json
+            _json.dump({"antigen_id": ag_id, "antigen_seq": ag_seq, "candidates": candidates},
+                       open(args.out, "w"))
+            print(f"  [save] {len(candidates)}/{args.trajectories} 후보 → {args.out}")
 
     del model, raw_fwd            # 설계 모델 해제 (랭킹 critic 메모리 확보)
     torch.cuda.empty_cache()

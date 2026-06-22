@@ -416,8 +416,24 @@ def _build_spi(
     protein_chains_data = [c for c in chains if c["type"].lower() == "protein"]
     paired_msas: dict[str, MSA] = {}
     if msa_mode == "auto" and len(protein_chains_data) >= 2:
-        print(f"  [auto] {len(protein_chains_data)}개 protein 체인 감지 → paired MSA 검색")
-        paired_msas = _get_or_create_paired_msas(protein_chains_data, yaml_dir, select=select)
+        # ── 동일서열(homo-oligomer) dedup → unique 만 검색 후 broadcast ──
+        # colabfold_search 가 동일 체인을 dedup 해서 combined a3m 세그먼트 수가 줄면,
+        # _split_combined_a3m 이 원래 체인수 길이로 자르다 어긋나 일부 체인이 빈 MSA →
+        # construct_paired_msa 크래시. unique 로만 검색하고 같은 서열 체인끼리 MSA 공유해 회피.
+        _norm = lambda s: s.replace("\n", "").replace(" ", "")
+        uniq_chains: list[dict] = []
+        seq2uid: dict[str, str] = {}
+        for c in protein_chains_data:
+            s = _norm(c["sequence"])
+            if s not in seq2uid:
+                seq2uid[s] = c["id"]; uniq_chains.append(c)
+        if len(uniq_chains) < len(protein_chains_data):
+            print(f"  [auto] 동일서열 dedup: {len(protein_chains_data)}체인 → "
+                  f"unique {len(uniq_chains)}개 {[c['id'] for c in uniq_chains]} 검색 후 broadcast")
+        print(f"  [auto] {len(uniq_chains)}개 unique protein 체인 → paired MSA 검색")
+        uniq_msas = _get_or_create_paired_msas(uniq_chains, yaml_dir, select=select)
+        paired_msas = {c["id"]: uniq_msas[seq2uid[_norm(c["sequence"])]]
+                       for c in protein_chains_data}     # 같은 서열 체인 = 같은 MSA
 
     sequences = []
     for chain in chains:
