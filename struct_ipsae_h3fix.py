@@ -4,26 +4,28 @@
 import glob
 import json
 import os
+import sys
 from collections import defaultdict
 
 import numpy as np
 
 from validate_vs_8ucd import struct_based
 
-OUT = "runs/_h3fix_struct"
+RANK_DIR = sys.argv[1] if len(sys.argv) > 1 else "runs/h3fix_rank_fv"   # 인자로 rank 디렉토리
+OUT = RANK_DIR.rstrip("/") + "_struct"
 os.makedirs(OUT, exist_ok=True)
 
 groups = defaultdict(list)
-for cif in sorted(glob.glob("runs/h3fix_rank_fv/*_seed*_sample*.cif")):
+for cif in sorted(glob.glob(f"{RANK_DIR}/*_seed*_sample*.cif")):
     name = os.path.basename(cif)[:-4].split("_seed")[0]
     groups[name].append(cif)
-refs = sorted(glob.glob("runs/_rebase/ref_seed*_sample*.cif"))
+refs = sorted(glob.glob("runs/_rebase/ref_seed*_sample*.cif"))      # native baseline(공통)
 if refs:
     groups["REF_native"] = refs
 
 mp = {}
 try:
-    for r in json.load(open("runs/h3fix_rank_fv/ranked_fv.json")):
+    for r in json.load(open(f"{RANK_DIR}/ranked_fv.json")):
         mp[r["name"]] = (r["mean_ipsae"], r["max_ipsae"])
 except Exception:
     pass

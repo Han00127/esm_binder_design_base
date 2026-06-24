@@ -34,10 +34,12 @@ class Alg11Params:
     lambda_intra: float = 0.5
     lambda_inter: float = 0.5
     lambda_glob: float = 0.2
+    lambda_form: float = 0.5   # L_map: H3 loop form 유지 가중 (map_targets 일 때)
     lambda_comp: float = 0.0   # composition-KL(자연 CDR 분포) 가중 (0=끔)
     low_temp: float = 0.05     # T<low_temp → confidence/ipTM 추적 구간
     iptm_steps: int = 50       # 저온 confidence forward diffusion steps
     distogram_sampling: int = 1  # 고온 distogram forward sampler steps(최소)
+    num_loops: int = 1         # recycle 수 (native sweep: 3~5가 distogram 도킹 표현 최적)
 
 
 def init_logits(L, mutable_idx, prompt_ids, cys_col, device):
@@ -68,9 +70,26 @@ def _norm_grad(g, mask, n_mut):
     return (n_mut ** 0.5) * gm / (gm.norm() + 1e-8)
 
 
+def _cdr_rms_track(dgram, mt):
+    """접촉 RMS(Å)를 CDR/그룹별로 — backward 안 함(wandb 모니터용). {rms_H1, rms_H3, rms_L3, rms_design ...}"""
+    with torch.no_grad():
+        ed = losses._expected_dist(dgram)
+
+        def rms(mask):
+            if mask is None or not bool(mask.any()):
+                return None
+            e = ed[mt["b_idx"][mask], mt["a_idx"][mask]] - mt["target"][mask]
+            return round(float((e * e).mean().sqrt()), 2)
+
+        out = {f"rms_{c}": rms(mk) for c, mk in mt["cdr_masks"].items()}
+        out["rms_design"] = rms(mt["backward_mask"])                # 설계영역(=backward 대상)
+        out["rms_all"] = rms(torch.ones_like(mt["backward_mask"]))  # 전체 66쌍
+        return out
+
+
 def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_idx,
                     prompt_ids, cys_col, build_soft_full, fold_idx=None, esmc_score_fn=None,
-                    iptm_fn=None, comp_fn=None, metrics_cb=None, arom_cols=None, seed=0,
+                    iptm_fn=None, comp_fn=None, map_targets=None, metrics_cb=None, arom_cols=None, seed=0,
                     params: Alg11Params = Alg11Params(), device="cuda", log=print):
     """Algorithm 11 실행. 반환: dict(best_seq_logits, best_iptm, final_logits, history).
 
@@ -84,7 +103,7 @@ def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_id
     x, gmask, mut = init_logits(L, mutable_idx, prompt_ids, cys_col, device)
     P = params
     n_mut = max(1, len(mutable_idx))
-    best_iptm, best_logits = -1.0, x.detach().clone()
+    best_iptm, best_logits = -float("inf"), x.detach().clone()   # -inf: map(-L_inter 음수)도 갱신되게
     hist = []
     t_loop = time.time()
 
@@ -98,10 +117,21 @@ def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_id
         soft_full = build_soft_full(soft_s, Tk)                                  # line9 concat
         dgram = esmfold_distogram(model, raw_fwd, feats, soft_full, P)           # line11 (grad)
         fold = fold_idx if fold_idx is not None else binder_idx
-        L_intra = losses.intra_contact(dgram, fold)
-        L_inter = losses.inter_contact(dgram, binder_idx, target_idx)
-        L_glob = losses.globularity(dgram, fold)
-        L_struct = P.lambda_intra * L_intra + P.lambda_inter * L_inter + P.lambda_glob * L_glob  # line21
+        if map_targets is not None:                                              # ── L_map (8UCD 기하 타깃) ──
+            bm = map_targets["backward_mask"]                                    # ★ backward = 설계가능(mutable) 접촉만
+            L_inter = losses.map_inter(dgram, map_targets["b_idx"][bm],
+                                       map_targets["a_idx"][bm], map_targets["target"][bm])
+            L_form = losses.map_form(dgram, map_targets["h3_idx"], map_targets["h3_intra"])
+            L_glob = losses.globularity(dgram, fold)
+            L_intra = L_form                                                     # 로깅 호환(손바닥=form)
+            L_struct = P.lambda_inter * L_inter + P.lambda_form * L_form + P.lambda_glob * L_glob
+            cdr_rms = _cdr_rms_track(dgram, map_targets)                         # per-CDR RMS (모니터, backward X)
+        else:                                                                    # ── 기존 loose inter ──
+            L_intra = losses.intra_contact(dgram, fold)
+            L_inter = losses.inter_contact(dgram, binder_idx, target_idx)
+            L_glob = losses.globularity(dgram, fold)
+            L_struct = P.lambda_intra * L_intra + P.lambda_inter * L_inter + P.lambda_glob * L_glob  # line21
+            cdr_rms = {}
         # distogram-ipTM proxy (b* 추적용; dgram 재사용 → 추가 forward 0). 높을수록↑
         disto_iptm = float(losses.interface_tm(dgram, binder_idx, target_idx))
         g_struct = torch.autograd.grad(L_struct, x, retain_graph=False)[0]       # line23 (ESMFold2 그래프 해제)
@@ -111,7 +141,9 @@ def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_id
         #   update *전* 현재 설계(=argmax(soft_k), 반환될 b*)를 real confidence head 로 평가.
         #   iptm_fn 없으면(=근사) distogram-ipTM proxy 로 폴백.
         if Tk < P.low_temp:
-            if iptm_fn is not None:
+            if map_targets is not None:
+                track_iptm = -float(L_inter)                                     # L_map: 접촉 MSE 최소가 best
+            elif iptm_fn is not None:
                 track_iptm = iptm_fn(x.detach())                                 # line13 real ipTM_k
             else:
                 track_iptm = disto_iptm                                          # 근사 폴백
@@ -148,7 +180,7 @@ def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_id
 
         m = {"k": k, "T": Tk, "L_intra": float(L_intra), "L_inter": float(L_inter),
              "L_glob": float(L_glob), "L_LM": float(L_LM), "L_comp": float(L_comp),
-             "arom_frac": arom_frac, "disto_iptm": disto_iptm, "best_iptm": best_iptm}
+             "arom_frac": arom_frac, "disto_iptm": disto_iptm, "best_iptm": best_iptm, **cdr_rms}
         hist.append(m)
         if metrics_cb is not None:
             metrics_cb(m)
@@ -160,7 +192,7 @@ def optimize_binder(model, raw_fwd, feats, *, binder_idx, target_idx, mutable_id
     log(f"[opt] {P.K} steps in {dt:.0f}s = {dt / P.K:.2f}s/step "
         f"(LM={'on' if esmc_score_fn else 'off'})")
     final_logits = x.detach().clone()
-    if best_iptm < 0:                      # 저온 추적 없었으면 최종 서열
+    if best_iptm == float("-inf"):        # 저온 추적 한 번도 없었으면 최종 서열
         best_logits = final_logits
     return {"best_logits": best_logits, "best_iptm": best_iptm,
             "final_logits": final_logits, "history": hist}
@@ -170,4 +202,4 @@ def esmfold_distogram(model, raw_fwd, feats, soft_full, P):
     """distogram_forward 래퍼 (esmfold_diff import 순환 피하려 여기서)."""
     from esmfold_diff import distogram_forward
     return distogram_forward(model, raw_fwd, feats, soft_full,
-                             num_sampling_steps=P.distogram_sampling)
+                             num_sampling_steps=P.distogram_sampling, num_loops=P.num_loops)

@@ -63,6 +63,10 @@ def main():
                     help="α_max override (Alg11 기본 0.1; K 축소 시 total path length 보정용)")
     ap.add_argument("--lambda-lm", type=float, default=0.05,
                     help="LM prior 가중치 λ_LM (기본 0.05; 줄이면 LM 영향↓)")
+    ap.add_argument("--lmap", default=None,
+                    help="map-anchored 타깃 npz (build_lmap_targets.py). 주면 loose inter→L_map(손가락+손바닥)")
+    ap.add_argument("--lambda-form", type=float, default=0.5, help="L_map H3 loop form 가중")
+    ap.add_argument("--num-loops", type=int, default=1, help="recycle 수 (native sweep: 3~5 권장)")
     args = ap.parse_args()
     dev = args.device
     cfg = yaml.safe_load(open(args.config))
@@ -165,6 +169,41 @@ def main():
     model, raw_fwd = load(device=dev)
 
     P = Alg11Params(lambda_LM=args.lambda_lm, lambda_comp=(args.lambda_comp if args.pssm else 0.0))
+    P.lambda_form = args.lambda_form
+    P.num_loops = args.num_loops
+
+    # ── map-anchored 타깃 (8UCD 실측 CA-CA) → L_map (loose inter 대체) ──
+    map_targets = None
+    if args.lmap:
+        import numpy as _np
+        z = _np.load(args.lmap, allow_pickle=True)
+        bidx = z["inter_b_idx"].astype(int)
+        sl = bidx - sc_off                                          # scFv-local (CDR 라벨용)
+
+        def _cdr(s):                                                # scFv 위치 → CDR (8UCD numbering -1)
+            if 25 <= s <= 34: return "H1"
+            if 46 <= s <= 65: return "H2"
+            if 96 <= s <= 109: return "H3"
+            if 159 <= s <= 170: return "L1"
+            if 181 <= s <= 191: return "L2"
+            if 224 <= s <= 234: return "L3"
+            return "FR"
+        labels = [_cdr(int(s)) for s in sl]
+        cdr_masks = {c: torch.as_tensor([lb == c for lb in labels], device=dev)
+                     for c in ("H1", "H2", "H3", "L1", "L2", "L3")}
+        mut_set = set(int(i) for i in mutable_idx)                  # 설계가능 잔기 전역 인덱스
+        backward_mask = torch.as_tensor([int(b) in mut_set for b in bidx], device=dev)  # ★ backward 대상
+        map_targets = {
+            "b_idx": torch.as_tensor(bidx, dtype=torch.long, device=dev),
+            "a_idx": torch.as_tensor(z["inter_a_idx"], dtype=torch.long, device=dev),
+            "target": torch.as_tensor(z["inter_target_caca"], dtype=torch.float32, device=dev),
+            "h3_idx": torch.as_tensor(sc_off + z["h3_scfv_local"].astype(int), dtype=torch.long, device=dev),
+            "h3_intra": torch.as_tensor(z["h3_intra_caca"], dtype=torch.float32, device=dev),
+            "backward_mask": backward_mask, "cdr_masks": cdr_masks,
+        }
+        print(f"[run] L_map: 접촉 {len(bidx)}쌍 (backward 설계가능 {int(backward_mask.sum())}쌍) + "
+              f"H3 loop {len(z['h3_scfv_local'])}잔기 | num_loops={P.num_loops} "
+              f"| CDR별: " + " ".join(f"{c}:{int(m.sum())}" for c, m in cdr_masks.items()))
     if args.steps:
         P.K = args.steps
     if args.alpha_max is not None:
@@ -223,7 +262,7 @@ def main():
             binder_idx=cdr_idx, target_idx=target_idx, mutable_idx=mutable_idx,
             fold_idx=fold_idx, prompt_ids=prompt_ids, cys_col=CYS_J,
             build_soft_full=build_soft_full, esmc_score_fn=esmc_score_fn,
-            iptm_fn=iptm_fn, comp_fn=comp_fn, metrics_cb=(mcb if wb else None),
+            iptm_fn=iptm_fn, comp_fn=comp_fn, map_targets=map_targets, metrics_cb=(mcb if wb else None),
             arom_cols=arom_cols, seed=sd, params=P, device=dev)
         xb = res["best_logits"]
         scfv_des = list(scfv)

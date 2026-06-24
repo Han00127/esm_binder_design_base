@@ -63,11 +63,12 @@ def load(weights: str = DEFAULT_WEIGHTS, device: str = "cuda"):
     return model, raw_fwd
 
 
-def distogram_forward(model, raw_fwd, feats, soft, num_sampling_steps: int = 1):
+def distogram_forward(model, raw_fwd, feats, soft, num_sampling_steps: int = 1, num_loops: int = 1):
     """soft 서열 → distogram_logits (grad). Alg11 line 11 (trunk+distogram).
-    num_sampling_steps 작게 → sampler 최소(논문 'trunk and distogram only' 근사)."""
+    num_sampling_steps 작게 → sampler 최소(논문 'trunk and distogram only' 근사).
+    num_loops = recycle 수 (기본 1; 늘리면 distogram 정제)."""
     out = forward_design(model, raw_fwd, feats, soft,
-                         num_loops=1, num_sampling_steps=num_sampling_steps,
+                         num_loops=num_loops, num_sampling_steps=num_sampling_steps,
                          num_diffusion_samples=1, autocast=True)
     return out["distogram_logits"]
 

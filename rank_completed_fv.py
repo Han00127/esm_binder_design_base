@@ -70,7 +70,8 @@ def main():
     vh = _clean(cfg["antibody"]["heavy"]["vh_sequence"])
     vl = _clean(cfg["antibody"]["light"]["vl_sequence"])
 
-    out_dir = f"{ESM}/runs/h3fix_rank_fv"
+    _base = os.path.basename(inp).replace("_designs.json", "").replace(".json", "")
+    out_dir = f"{ESM}/runs/{_base}_rank_fv"          # 입력별 분리(h3fix/lmap 안 섞임)
     os.makedirs(out_dir, exist_ok=True)
     print(f"[rank-fv] {len(cands)} 설계 × {n_seed}seed×{N_SAMPLE}sample (loops={N_LOOPS}) → "
           f"Fv fold(--msa auto, GPU{gpu})  baseline: ref(native) mean=0.17/max=0.23 / 기존 full설계=0.00\n")

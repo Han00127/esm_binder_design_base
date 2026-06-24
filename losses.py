@@ -102,6 +102,39 @@ def interface_tm(distogram_logits, binder_idx, target_idx):
     return per_row.max()
 
 
+# ── map-anchored loss (L_map): 8UCD 실측 CA-CA 를 distogram 타깃으로 ───────────
+MAP_DIST_SCALE = 5.0   # MSE 정규화 스케일(Å) → loss ~O(1) (λ 튜닝 직관화)
+
+
+def _expected_dist(distogram_logits):
+    """distogram → 기대 CA-CA 거리 [L,L]."""
+    c = bin_centers(distogram_logits.device)
+    p = F.softmax(distogram_logits.float(), dim=-1)
+    exp_d = (p * c).sum(-1)
+    return exp_d[0] if exp_d.dim() == 3 else exp_d
+
+
+def map_inter(distogram_logits, b_idx, a_idx, target, weights=None):
+    """interface 접촉쌍(b_idx↔a_idx)의 기대 CA-CA 를 8UCD target 으로 끌어당김 (정규화 MSE).
+    b_idx,a_idx: Long[P] 전역 distogram 인덱스. target: [P] Å. 손가락→항원. 낮을수록↓."""
+    exp_d = _expected_dist(distogram_logits)
+    se = ((exp_d[b_idx, a_idx] - target) / MAP_DIST_SCALE) ** 2
+    if weights is not None:
+        return (se * weights).sum() / (weights.sum() + 1e-8)
+    return se.mean()
+
+
+def map_form(distogram_logits, idx, target_intra, seqsep=2):
+    """H3 loop 내부 기대 CA-CA 를 8UCD loop 모양(target_intra)으로 유지 (정규화 MSE).
+    idx: Long[n] H3 전역 인덱스. target_intra: [n,n]. |i-j|≥seqsep 만. 손바닥 form. 낮을수록↓."""
+    exp_d = _expected_dist(distogram_logits)
+    sub = exp_d[idx][:, idx]
+    n = idx.shape[0]
+    ii = torch.arange(n, device=sub.device)
+    mask = (ii[:, None] - ii[None, :]).abs() >= seqsep
+    return (((sub - target_intra) / MAP_DIST_SCALE) ** 2)[mask].mean()
+
+
 # ── Alg 14: MaskedPseudoPPL (ESMC LM prior) ───────────────────────────────────
 def masked_pseudo_ppl(esmc_score_fn, soft_binder, mutable_mask,
                       M: int = 4, r_mask: float = 0.15, seed: int = 0):
