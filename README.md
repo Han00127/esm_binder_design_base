@@ -41,11 +41,3 @@ conda activate esmfold2
 
 > ESMFold2는 커스텀 fork(`Biohub/transformers`, `Biohub/esm`)에 의존 — `requirements.txt`에 포함됨.
 
-## 가중치 경로 (환경변수로 덮어쓰기)
-
-| 환경변수 | 기본 |
-|---|---|
-| `ESMFOLD2_WEIGHTS` | `/home/aidx/DB/weights/esmfold2/ESMFold2` |
-| (ESMC-600M) | `/home/aidx/DB/weights/esmfold2/ESMC-600M` |
-| (critics) | `/home/aidx/DB/weights/esmfold2/esmfold2_critics` |
-| `MSA_CACHE_DIR` | `/home/kyeongtak/structure_projects/msa` |
