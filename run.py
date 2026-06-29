@@ -66,6 +66,7 @@ def main():
     ap.add_argument("--lmap", default=None,
                     help="map-anchored 타깃 npz (build_lmap_targets.py). 주면 loose inter→L_map(손가락+손바닥)")
     ap.add_argument("--lambda-form", type=float, default=0.5, help="L_map H3 loop form 가중")
+    ap.add_argument("--lambda-inter", type=float, default=0.5, help="L_map inter(접촉 MSE) 가중 (높이면 인터페이스 앵커링↑)")
     ap.add_argument("--num-loops", type=int, default=1, help="recycle 수 (native sweep: 3~5 권장)")
     args = ap.parse_args()
     dev = args.device
@@ -170,6 +171,7 @@ def main():
 
     P = Alg11Params(lambda_LM=args.lambda_lm, lambda_comp=(args.lambda_comp if args.pssm else 0.0))
     P.lambda_form = args.lambda_form
+    P.lambda_inter = args.lambda_inter
     P.num_loops = args.num_loops
 
     # ── map-anchored 타깃 (8UCD 실측 CA-CA) → L_map (loose inter 대체) ──
